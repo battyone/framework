@@ -55,6 +55,26 @@ function split_names(s)
 	return result
 end
 
+function N(x) -- Нормальное среднее
+    if (x > 10) then
+      return 1
+   elseif (x < -10) then
+      return 0
+   else
+      local t = 1 / (1 + 0.2316419 * math.abs(x))
+      local p = 0.3989423 * math.exp(-0.5 * x * x) * t * ((((1.330274 * t - 1.821256) * t + 1.781478) * t - 0.3565638) * t + 0.3193815)
+      if x > 0 then
+         p=1-p
+      end
+      return p
+   end
+end
+
+function pN(x) -- производная от функции нормального среднего
+   return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
+end
+
+
 -- Unique identifier for keys to unique identify stocks
 local function MTID(market, ticker)
 	return market..":"..ticker
@@ -318,11 +338,14 @@ function MarketData:constructor()
 	end
 	QUOTE_SUBS:subscribe(self.market, self.ticker)
 	log:trace("MarketData created: " .. self.market .. " " .. self.ticker)
+	
 end
+
 function MarketData:indexer(key)
 	if MarketData[key] ~= nil then
 		return MarketData[key]
 	end
+
 	if key == "bids" then
 		local data = getQuoteLevel2(self.market, self.ticker).bid
 		if (data == nil) then
@@ -338,6 +361,26 @@ function MarketData:indexer(key)
 		end
 		data = table.transform(data, self._pvconverter)
 		return data or {}
+	elseif key == "delta" then
+		local status =  (getParamEx(self.market, self.ticker, "OPTIONTYPE").param_image)
+		if status == "" then return 1 end
+	    return self:bs("DELTA")
+	elseif key == "vega" then
+		local status =  (getParamEx(self.market, self.ticker, "OPTIONTYPE").param_image)
+		if status == "" then return nil end
+	    return self:bs("VEGA")
+	elseif key == "gamma" then
+		local status =  (getParamEx(self.market, self.ticker, "OPTIONTYPE").param_image)
+		if status == "" then return nil end
+	    return self:bs("GAMMA")
+	elseif key == "theta" then
+		local status =  (getParamEx(self.market, self.ticker, "OPTIONTYPE").param_image)
+		if status == "" then return nil end
+	    return self:bs("THETA")
+	elseif key == "tprice" then
+		local status =  (getParamEx(self.market, self.ticker, "OPTIONTYPE").param_image)
+		if status == "" then return nil end
+	    return self:bs("PRICE")				
 	end
 	local param = getParamEx(self.market, self.ticker, key)
 	if tonumber(param.param_type) < 3 then
@@ -345,6 +388,50 @@ function MarketData:indexer(key)
 	else
 		return param.param_value
 	end
+end
+function MarketData:bs(msg)
+		local data =0
+		local YearLen=365.0
+		local otype = getParamEx(self.market, self.ticker, "optiontype").param_image
+		local b = getParamEx(self.market,  self.ticker, "volatility").param_value/100 											
+    	local S = getParamEx("SPBFUT",  (getParamEx(self.market, self.ticker, "OPTIONBASE").param_image), "settleprice").param_value  						
+		local Tt = getParamEx(self.market,  self.ticker, "DAYS_TO_MAT_DATE").param_value/YearLen 									
+		local K = getParamEx(self.market, self.ticker, "strike").param_value 														
+		local r = 0.0 																--"r" безрисковая процентная ставка;
+		local d1 = (math.log(S / K) + (b * b * 0.5) * Tt) / (b * math.pow(Tt,0.5))
+		local d2 = d1-(b * math.pow(Tt,0.5))
+		local e = math.exp(-1 * r * Tt)
+
+		if msg == "GAMMA" then
+			data = pN(d1) / (S * b * math.sqrt(Tt))
+			return data
+		elseif msg == "VEGA" then
+			data = S * e * pN(d1) * math.pow(Tt,0.5)/100
+			return data
+		elseif msg == "THETA" then
+			local Theta = (-1 * S * b * e * pN(d1)) / (2 * math.pow(Tt,0.5))/YearLen
+			if otype == "Call" then
+				data = Theta - (r * K * e * N(d2)) + r * S * e * N(d1)
+				else
+				data = Theta + (r * K * e * N(-1 * d2)) - r * S * e * N(-1 * d1)
+			end	
+			return data
+		elseif msg == "DELTA" then
+			if otype == "Call" then
+				data = e * N(d1)
+				else
+				data = -1 * e * N(-1*d1)
+			end	
+			return data
+		elseif msg == "PRICE" then
+			if otype == "Call" then
+				data = S * N(d1) - K * e * N (d2)
+				else
+				data = K * e * N(-1 * d2) - S * N (-1 * d1)
+			end	
+			return data
+		end				
+
 end
 function MarketData:fit(price)
 	local step = self.sec_price_step
@@ -680,7 +767,35 @@ function OnInit(path)
 	end
 
 	IDPool = create_idpool()
+	
+	-- init log file 
+	--log_file = io.open(path.."_print.log", "a");
+	log_file = io.open(path.."_print.log", "w+");
+	log_file:write("\n");
+	print("init")
 end
+
+  -- to log
+function print(...)
+   local r = { '[', os.date(), '] ' };
+   local first = true;
+   for _,v in pairs({...}) do
+      if (first) then first = false; else r[#r+1] = '\t'; end
+      r[#r+1] = tostring(v);
+   end
+   r[#r+1] = '\n';
+   log_file:write(table.concat(r));
+   log_file:flush();
+end 
+
+
+
+
+
+
+
+
+
 
 --[[ TRANSACTION CALLBACK ]]--
 function OnTransReply(trans_reply)
